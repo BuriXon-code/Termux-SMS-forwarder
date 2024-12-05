@@ -1,0 +1,171 @@
+#!/bin/bash
+
+CACHE_FILE="$HOME/.sms_forwarder_cache.txt"
+COUNT=50
+DELAY=30
+NUMBERS=""
+SIM=""
+SIM_ID=""
+FROM=""
+
+touch "$CACHE_FILE"
+
+function usage {
+	echo -e "\e[38;5;33mUsage: $(basename $0) -n <numbers> -s <sim> [-c <count>] [-d <delay>]\e[0m"
+	echo -e "\t\e[38;5;76m-n --numbers\e[0m	Comma-separated list of phone numbers (e.g., 123456789,+48987654321,999444666)"
+	echo -e "\t\e[38;5;76m-s --sim\e[0m		SIM slot to use (0 for SIM 1, 1 for SIM 2)"
+	echo -e "\t\e[38;5;76m-c --count\e[0m		Number of recent SMS to check (1-1000, default 50)"
+	echo -e "\t\e[38;5;76m-d --delay\e[0m		Delay between sending SMS (1-3600 seconds, default 30 seconds)"
+	echo -e "\t\e[38;5;76m-h --help\e[0m		Show this help message"
+	echo -e "\t\e[38;5;76m-f --from\e[0m		Specify the original sender's name or number (e.g., 'Biedronka' or a phone number)"
+}
+
+function check_termux_sms_list {
+	if ! command -v termux-sms-list &> /dev/null; then
+		echo -e "\e[38;5;196mERROR: termux-sms-list not found. Make sure Termux:API is installed.\e[0m"
+		exit 1
+	fi
+	
+	timeout 20 termux-sms-list &> /dev/null
+	if [[ $? -ne 0 ]]; then
+		echo -e "\e[38;5;196mERROR: Failed to execute termux-sms-list. Ensure Termux:API is installed and functional.\e[0m"
+		exit 1
+	fi
+}
+
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		-f|--from)
+			FROM="$2"
+			if [[ -z $FROM ]]; then
+				echo -e "\e[38;5;196mERROR: The -f | --from parameter cannot be empty.\e[0m"
+				usage
+				exit 1
+			fi
+			shift 2
+			;;
+		-n|--numbers)
+			NUMBERS="$2"
+			IFS=',' read -r -a NUMBER_LIST <<< "$NUMBERS"
+			for NUMBER in "${NUMBER_LIST[@]}"; do
+				if [[ ! "$NUMBER" =~ ^(\+?[0-9]+[- ]*)*$ ]]; then
+					echo -e "\e[38;5;196mERROR: Invalid phone number format: $NUMBER\e[0m"
+					usage
+					exit 1
+				fi
+			done
+			shift 2
+			;;
+		-s|--sim)
+			SIM="$2"
+			if [[ "$SIM" == "1" ]]; then
+				SIM_ID=0
+			elif [[ "$SIM" == "2" ]]; then
+				SIM_ID=1
+			else
+				echo -e "\e[38;5;196mERROR: Invalid SIM slot. Use 0 for SIM 1 or 1 for SIM 2.\e[0m"
+				usage
+				exit 1
+			fi
+			shift 2
+			;;
+		-c|--count)
+			COUNT="$2"
+			if [[ "$COUNT" -lt 1 || "$COUNT" -gt 1000 ]]; then
+				echo -e "\e[38;5;196mERROR: Count must be between 1 and 1000.\e[0m"
+				usage
+				exit 1
+			fi
+			shift 2
+			;;
+		-d|--delay)
+			DELAY="$2"
+			if [[ "$DELAY" -lt 1 || "$DELAY" -gt 3600 ]]; then
+				echo -e "\e[38;5;196mERROR: Delay must be between 1 and 3600 seconds.\e[0m"
+				usage
+				exit 1
+			fi
+			shift 2
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		*)
+			echo -e "\e[38;5;196mERROR: Unknown option: $1\e[0m"
+			usage
+			exit 1
+			;;
+	esac
+done
+
+if [[ -z "$NUMBERS" || -z "$SIM" || -z "$FROM" ]]; then
+	echo -e "\e[38;5;196mERROR: You must specify phone numbers (-n), SIM slot (-s) and original sender (-f).\e[0m"
+	usage
+	exit 1
+fi
+
+check_termux_sms_list
+
+function get_spec_messages {
+	timeout 20 termux-sms-list -l "$COUNT" | \
+		jq -c ".[] | select(.number == \"$FROM\")" | \
+		jq -r '.body' | \
+		sed 's/^"//;s/"$//'
+}
+
+function is_message_in_cache {
+	local message="$1"
+	grep -Fxq "$message" "$CACHE_FILE"
+}
+
+function save_message_to_cache {
+	local message="$1"
+	echo "$message" >> "$CACHE_FILE"
+}
+
+function main {
+	SMS_MESSAGES=$(get_spec_messages)
+
+	if [[ -z "$SMS_MESSAGES" ]]; then
+		echo -e "\e[38;5;196mNo messages from $FROM found.\e[0m"
+		exit 0
+	fi
+
+	while read -r MESSAGE; do
+		if ! is_message_in_cache "$MESSAGE"; then
+			for NUMBER in "${NUMBER_LIST[@]}"; do
+				echo -e "\e[38;5;45mRecipient:\e[0m $NUMBER"
+				echo -e "\e[38;5;45mMessage:\e[0m $MESSAGE"
+				echo -e "\e[38;5;45mSIM Slot:\e[0m $SIM\n"
+				termux-sms-send -n "$NUMBER" -s "$SIM_ID" "$MESSAGE"
+				sleep "$DELAY"
+			done
+			save_message_to_cache "$MESSAGE"
+		else
+			echo -e "\e[38;5;214mSkipping message (already forwarded):\e[0m $MESSAGE\n"
+		fi
+	done <<< "$SMS_MESSAGES"
+}
+
+abort() {
+echo -e "\n\e[?25h\n\e[38;5;196mAborting ...\e[K\n"
+exit 1
+}
+
+trap abort SIGINT
+
+echo -e "\n\e[38;5;45mPress CTRL + C to abort.\e[0m\e[?25l"
+echo -e "\e[38;5;196mStarting in 5 ..."
+sleep 1
+echo -e "\e[1A\e[38;5;202mStarting in 4 ..."
+sleep 1
+echo -e "\e[1A\e[38;5;220mStarting in 3 ..."
+sleep 1
+echo -e "\e[1A\e[38;5;190mStarting in 2 ..."
+sleep 1
+echo -e "\e[1A\e[38;5;46mStarting in 1 ..."
+sleep 1
+echo -e "\e[1A\e[38;5;86mStarting ...\e[K\e[0m\n\n"
+
+main
